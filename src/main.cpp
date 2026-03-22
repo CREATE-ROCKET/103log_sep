@@ -40,7 +40,12 @@ spi_host_device_t host_in = SPI2_HOST;
 can_return_t can_data;
 u_int32_t can_id;
 char can_cmd;
+u_int8_t can_cmd_temp;
 char Serial_cmd = -1;
+u_int8_t can_icm[6];
+u_int8_t can_lps[3];
+u_int8_t can_risyou[1];
+u_int8_t can_top[1];
 u_int32_t start_time = 0;
 u_int32_t log_time = 0;
 u_int32_t flash_time = 0;
@@ -55,9 +60,6 @@ int icm_risyou_sum = 0;
 int avg_ax = 0;
 int avg_ay = 0;
 int avg_az = 0;
-const int tikatika_syuuki = 200;
-const int tikatika_syuuki2 = 4000;
-volatile int tikatika_count = 0;
 volatile int r_count = 0;
 volatile int l_count = 0;
 volatile int LED_count = 0;
@@ -76,9 +78,10 @@ int lps_kaisan_sum = 0;
 int lps_kaisan_before = 0;
 volatile bool risyou_flag = false;
 volatile bool kaisan_flag = false;
-volatile bool risyou_siriaru = false;
+volatile bool top_flag = false;
+volatile bool Serial_risyou = false;
 volatile int kaisan_timer = 0;
-volatile bool kaisan_siriaru = false;
+volatile bool Serial_kaisan = false;
 volatile bool standby_flag = false;
 volatile bool erase_flag = false;
 bool log_flag = false;
@@ -162,7 +165,11 @@ IRAM_ATTR void counter()
       if (lps_kaisan_sum / 10 > lps_kaisan_before)
       {
         lps_kaisan_count++;
-        if (lps_kaisan_count == 5) // ここを変える テストのときは4 本番は9
+        if (lps_kaisan_count == 3)
+        {
+          top_flag = true;
+        }
+        if (lps_kaisan_count == 5) // ここを変える テストのときは4 本番は5
         {
           kaisan_flag = true; // 開傘条件クリア
           lps_kaisan_count = 0;
@@ -211,7 +218,7 @@ void setup()
 
   SPIC.begin(SPI2_HOST, SCK, MISO, MOSI);
 
-  if (CAN.begin(100E3, CAN_RX, CAN_TX, 10))
+  if (CAN.begin(125E3, CAN_RX, CAN_TX, 10))
   {
     Serial.println("CAN failed");
   }
@@ -219,7 +226,7 @@ void setup()
   {
     Serial.println("CAN succeeded !!!!");
   }
-
+  delay(10000);
   icm42688.begin(&SPIC, ICMCS, SPIFREQ);
   // Flashの初期化 この前にSPIの初期化を行う必要がある
   flash.begin(&SPIC, FlashCS, SPIFREQ);
@@ -255,7 +262,7 @@ void loop()
   {
     if (CAN.readWithDetail(&can_data))
     {
-      Serial.println("CAN failed");
+    //  Serial.println("CAN failed");
     }
     else
     {
@@ -299,10 +306,10 @@ void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
     j = 0;
 
     risyou_flag = false;
-    risyou_siriaru = false;
+    Serial_risyou = false;
 
     kaisan_flag = false;
-    kaisan_siriaru = false;
+    Serial_kaisan = false;
     kaisan_timer = 0;
     kaisan_count = 0;
 
@@ -332,7 +339,7 @@ void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
   {
     kaisan_count = 0;
     kaisan_timer = 0;
-    kaisan_siriaru = false;
+    Serial_kaisan = false;
     kaisan_flag = true;
   }
   if ((can_id == 0x00d && can_cmd == 'r') || Serial_cmd == 'r')
@@ -362,10 +369,13 @@ void standby()
     r_count = 0;
   }
 
-  if (!risyou_siriaru && risyou_flag)
+  if (!Serial_risyou && risyou_flag)
   {
+    can_risyou[0] = risyou_flag;
+    CAN.sendData(0x110, can_risyou, 1);
     Serial.println("risyou");
-    risyou_siriaru = true;
+    Serial_risyou = true;
+
     delay(500);
   }
   if (kaisan_timer >= 15000)
@@ -373,10 +383,16 @@ void standby()
     kaisan_flag = true;
     kaisan_timer = 0;
   }
-  if (!kaisan_siriaru && kaisan_flag)
+  if(top_flag){
+    Serial.println("top");
+    top_flag = false;
+    can_top[0] = top_flag;
+    CAN.sendData(0x12a, can_top, 1);
+  }
+  if (!Serial_kaisan && kaisan_flag)
   {
     Serial.println("kaisan");
-    kaisan_siriaru = true;
+    Serial_kaisan = true;
     update_LED();
     delay(500);
   }
@@ -407,14 +423,14 @@ void raw_data()
 
 void log_data()
 {
-  if (!erase_flag)
-  {
-    Serial.println("start erase...");
-    flash.erase();
-    Serial.println("erase DONE!!!");
-    erase_flag = true;
-  }
-    log_time = millis() - start_time;
+  // if (!erase_flag)
+  // {
+  //   Serial.println("start erase...");
+  //   flash.erase();
+  //   Serial.println("erase DONE!!!");
+  //   erase_flag = true;
+  // }
+  log_time = millis() - start_time;
   lps.Get(LPS_temp);
   noInterrupts();
   LPS25_data[0] = LPS_temp[0];
@@ -445,14 +461,27 @@ void log_data()
     tx[i + 10] = ICM_data[2] >> 8;
     tx[i + 11] = ICM_data[2];
     i += 12;
+    can_icm[0] = ICM_data[0] >> 8;
+    can_icm[1] = ICM_data[0];
+    can_icm[2] = ICM_data[1] >> 8;
+    can_icm[3] = ICM_data[1];
+    can_icm[4] = ICM_data[2] >> 8;
+    can_icm[5] = ICM_data[2];
+    CAN.sendData(0x11a, can_icm, 6);
+
+    can_lps[0] = LPS25_data[0];
+    can_lps[1] = LPS25_data[1];
+    can_lps[2] = LPS25_data[2];
+    CAN.sendData(0x10a, can_lps, 3);
+
     delay(10);
     if (i == 252)
     {
       Serial.println("hoge");
-      flash.write(j, tx);
-      delay(10); // 直後に読み出ししちゃうと誤った値が出る恐れがある
-      // 読み込み 256byte単位で読み込みができる
-      flash.read(j, rx);
+      // flash.write(j, tx);
+      // delay(10); // 直後に読み出ししちゃうと誤った値が出る恐れがある
+      // // 読み込み 256byte単位で読み込みができる
+      // flash.read(j, rx);
       // 読み込んだデータをシリアルで表示
       i = 0;
       j += 256;
@@ -508,8 +537,8 @@ void update_kaisan()
 {
   if (kaisan_flag)
   {
-    digitalWrite(MIN1, LOW);
-    digitalWrite(MIN2, HIGH);
+    digitalWrite(MIN1, HIGH);
+    digitalWrite(MIN2, LOW);
   }
   else
   {
